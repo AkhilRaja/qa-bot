@@ -1,3 +1,4 @@
+import json
 import os
 from typing import List
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -12,49 +13,62 @@ from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 
 app = FastAPI()
 
-# Set the OpenAI API key
-openai_api_key = "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"
-os.environ["OPENAI_API_KEY"] = openai_api_key
 
-# Function to process PDF and questions
-def process_qa(pdf_path: str, questions: List[str]):
-    # Load your text data using the TextLoader
-    loader = PyPDFLoader(pdf_path)
-    documents = loader.load()
+class QAProcessor:
+    def __init__(self, pdf_path: str, questions: List[str]):
+        self.pdf_path = pdf_path
+        self.questions = questions
 
-    # Generate VectorDB using Chroma and OpenAIEmbeddings
-    text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=0)
-    texts = text_splitter.split_documents(documents)
-    embeddings = OpenAIEmbeddings()
-    docsearch = Chroma.from_documents(texts, embeddings)
+    def process_qa(self):
+        self._validate_file()
+        documents = self._load_documents()
+        docsearch = self._create_doc_search(documents)
+        qa = self._create_qa_chain(docsearch)
+        return self._get_answers(qa)
 
-    # Create a ChatOpenAI instance for interactive chat using the OpenAI model
-    llm = ChatOpenAI(
-        streaming=True,
-        callbacks=[StreamingStdOutCallbackHandler()],
-        temperature=0,
-        openai_api_key=openai_api_key,
-    )
+    def _validate_file(self):
+        if not os.path.isfile(self.pdf_path):
+            raise ValueError(f"File not found at path: {self.pdf_path}")
 
-    # Create a RetrievalQA chain using the ChatOpenAI model and the document retriever
-    qa = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=docsearch.as_retriever(),
-    )
+    def _load_documents(self):
+        loader = PyPDFLoader(self.pdf_path)
+        return loader.load()
 
-    # Process each question and get answers
-    results = []
-    for question in questions:
-        answer = qa.run(question)
-        results.append({"question": question, "answer": answer})
+    def _create_doc_search(self, documents):
+        text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=0)
+        texts = text_splitter.split_documents(documents)
+        embeddings = OpenAIEmbeddings()
+        return Chroma.from_documents(texts, embeddings)
 
-    return results
+    def _create_qa_chain(self, docsearch):
+        llm = ChatOpenAI(
+            streaming=True,
+            callbacks=[StreamingStdOutCallbackHandler()],
+            temperature=0,
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+        )
+        return RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=docsearch.as_retriever(),
+        )
+
+    def _get_answers(self, qa):
+        results = []
+        for question in self.questions:
+            answer = qa.run(question)
+            results.append({"question": question, "answer": answer})
+            yield json.dumps({"question": question, "answer": answer}).encode("utf-8")
+
+        return results
+
 
 @app.post("/qa")
 async def run_qa(pdf_file: UploadFile = File(...), questions: List[str] = None):
     if questions is None:
         questions = []
+
+    processor = QAProcessor(pdf_file.filename, questions)
     
     # Save the uploaded PDF file to a temporary location
     with open(pdf_file.filename, "wb") as pdf:
@@ -62,13 +76,12 @@ async def run_qa(pdf_file: UploadFile = File(...), questions: List[str] = None):
 
     try:
         # Process PDF and questions
-        results = process_qa(pdf_file.filename, questions)
-        return results
+        return StreamingResponse(
+            processor.process_qa(),
+            media_type="application/json",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        # Clean up: Remove the temporary PDF file
-        os.remove(pdf_file.filename)
 
 if __name__ == "__main__":
     import uvicorn
