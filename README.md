@@ -1,4 +1,4 @@
-# Project Name
+# QA - Bot - Langchain
 
 Brief description or tagline for your project.
 
@@ -28,6 +28,8 @@ cd your-repo
 
 # Install dependencies
 pip install -r requirements.txt
+or
+poetry install
 
 ## Usage
 
